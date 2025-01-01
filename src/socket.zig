@@ -116,20 +116,20 @@ const ThreadArgs = struct {
     connection: ?*std.net.Server.Connection = null,
 };
 
-fn test_start_server(args: ThreadArgs) !void {
+fn test_start_server(args: *ThreadArgs) !void {
     var server = try args.address.listen(.{});
 
     args.semaphore.post();
-    const connection = try server.accept();
+    var connection = try server.accept();
 
-    args.server = server;
-    args.connection = connection;
+    args.server = &server;
+    args.connection = &connection;
 }
 
-fn test_send_data(args: ThreadArgs) !void {
+fn test_send_data(args: *ThreadArgs) !void {
     args.semaphore.post();
     if (args.connection) |connection| {
-        connection.stream.write("HelloFromTest");
+        _ = try connection.stream.write("HelloFromTest");
     }
 }
 
@@ -139,8 +139,8 @@ test "connect unconnected socket" {
     const address = try std.net.Address.parseIp4("127.0.0.1", 4444);
     var s = try Socket.init(allocator, address);
 
-    const args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444), .semaphore = std.Thread.Semaphore{} };
-    const thread = try std.Thread.spawn(.{}, test_start_server, .{args});
+    var args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444), .semaphore = std.Thread.Semaphore{} };
+    const thread = try std.Thread.spawn(.{}, test_start_server, .{&args});
 
     args.semaphore.wait();
     try s.connect();
@@ -149,7 +149,7 @@ test "connect unconnected socket" {
 
     try std.testing.expect(s.state == Socket.State.STATE_CONNECTED);
 
-    if (args.connection) |connection| connection.close();
+    if (args.connection) |connection| connection.stream.close();
     if (args.server) |server| server.deinit();
 }
 
@@ -159,18 +159,22 @@ test "recv data infinite timeout" {
     const address = try std.net.Address.parseIp4("127.0.0.1", 4444);
     var s = try Socket.init(allocator, address);
 
-    const args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444), .semaphore = std.Thread.Semaphore{} };
-    var thread = try std.Thread.spawn(.{}, test_start_server, .{args});
+    var args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444), .semaphore = std.Thread.Semaphore{} };
+    var thread = try std.Thread.spawn(.{}, test_start_server, .{&args});
 
     args.semaphore.wait();
     try s.connect();
     thread.join();
 
-    thread = try std.Thread.spawn(.{}, test_send_data, .{args});
+    thread = try std.Thread.spawn(.{}, test_send_data, .{&args});
     args.semaphore.wait();
-    const buf: [4096]u8 = [_]u8{0} ** 4096;
-    try s.recv(buf, null);
+    var buf: [4096]u8 = [_]u8{0} ** 4096;
+    const received = try s.recv(&buf, null);
 
-    if (args.connection) |connection| connection.close();
+    const expected = "HelloFromTest";
+    try std.testing.expect(received == expected.len);
+    try std.testing.expect(std.mem.eql(u8, &buf, expected));
+
+    if (args.connection) |connection| connection.stream.close();
     if (args.server) |server| server.deinit();
 }
