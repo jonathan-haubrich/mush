@@ -173,7 +173,7 @@ test "recv data infinite timeout" {
 
     const expected = "HelloFromTest";
     try std.testing.expect(received == expected.len);
-    try std.testing.expect(std.mem.eql(u8, &buf, expected));
+    try std.testing.expect(std.mem.eql(u8, buf[0..received], expected));
 
     if (args.connection) |*connection| connection.stream.close();
     if (args.server) |*server| server.deinit();
