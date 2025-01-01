@@ -65,40 +65,39 @@ pub const Socket = struct {
         self.stream.close();
     }
 
-    pub fn recv(self: *Self, buf: []const u8, timeout: ?u32) !usize {
+    pub fn recv(self: *Self, buf: [*]const u8, len: usize, timeout: ?u32) !usize {
         if (State.STATE_DISCONNECTED == self.state) {
             return SocketError.InvalidState;
         }
 
-        const ret = 0;
-        const bytes_transferred = 0;
-        const flags = 0;
-        const wsabuf = ws2_32.WSABUF{};
-        wsabuf.buf = &buf;
-        wsabuf.len = buf.len;
+        var ret: i32 = 0;
+        var bytes_transferred: u32 = 0;
+        var flags: u32 = 0;
+        const wsabuf: ws2_32.WSABUF = .{ .len = @as(u31, @truncate(len)), .buf = @constCast(buf) };
 
-        @memset(&self.overlapped, 0x00);
-        if (false == ws2_32.WSAResetEvent(self.event)) {
-            return ws2_32.WSAGetLastError();
+        @memset(std.mem.asBytes(&self.overlapped), 0x00);
+        if (0 == ws2_32.WSAResetEvent(self.event)) {
+            return @errorFromInt(@intFromEnum(ws2_32.WSAGetLastError()));
         }
         self.overlapped.hEvent = self.event;
 
-        ret = ws2_32.WSARecv(self.socket, &wsabuf, 1, null, &flags, &self.overlapped, null);
+        var wsabufs: [1]ws2_32.WSABUF = .{wsabuf};
+        ret = ws2_32.WSARecv(self.socket, &wsabufs, wsabufs.len, null, &flags, &self.overlapped, null);
         if (ws2_32.SOCKET_ERROR == ret and ws2_32.WinsockError.WSA_IO_PENDING != ws2_32.WSAGetLastError()) {
             return SocketError.RecvFailed;
         }
 
-        timeout = (timeout * 1000) orelse win.INFINITE;
-        ret = win.WaitForSingleObject(self.event, timeout);
-        if (win.WAIT_TIMEOUT == ret) {
-            return SocketError.RecvTimeout;
-        } else if (win.WAIT_FAILED == ret) {
-            return win.GetLastError();
+        var wait: u32 = win.INFINITE;
+
+        if (timeout) |t| {
+            wait = t * 1000;
         }
 
-        ret = ws2_32.WSAGetOverlappedResult(self.socket, &self.overlapped, &bytes_transferred, true, &flags);
-        if (false == ret) {
-            return ws2_32.WSAGetLastError();
+        try win.WaitForSingleObject(self.event, wait);
+
+        ret = ws2_32.WSAGetOverlappedResult(self.socket, &self.overlapped, &bytes_transferred, 1, &flags);
+        if (0 == ret) {
+            return @errorFromInt(@intFromEnum(ws2_32.WSAGetLastError()));
         }
 
         return bytes_transferred;

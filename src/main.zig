@@ -2,10 +2,22 @@ const std = @import("std");
 const socket = @import("socket.zig");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    const address = try std.net.Address.parseIp4("172.20.42.248", 4444);
-    var sock = try socket.Socket.init(allocator, address);
+    var ha = std.heap.HeapAllocator.init();
+    const allocator = ha.allocator();
 
-    try sock.connect();
+    const address = try std.net.Address.parseIp("172.20.42.248", 4444);
+
+    var s = try socket.Socket.init(allocator, address);
+
+    try s.connect();
+
+    var buf: [4096]u8 = [_]u8{0} ** 4096;
+
+    const ret = s.recv(&buf, buf.len, 10) catch |err| def: {
+        std.debug.print("Socket.recv failed: {}", .{err});
+
+        break :def 0;
+    };
+
+    std.debug.print("Received {d} bytes: {s}", .{ ret, buf });
 }
