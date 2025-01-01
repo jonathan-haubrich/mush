@@ -112,18 +112,18 @@ pub const Socket = struct {
 const ThreadArgs = struct {
     address: std.net.Address,
     semaphore: std.Thread.Semaphore,
-    server: ?*std.net.Server = null,
-    connection: ?*std.net.Server.Connection = null,
+    server: ?std.net.Server = null,
+    connection: ?std.net.Server.Connection = null,
 };
 
 fn test_start_server(args: *ThreadArgs) !void {
     var server = try args.address.listen(.{});
 
     args.semaphore.post();
-    var connection = try server.accept();
+    const connection = try server.accept();
 
-    args.server = &server;
-    args.connection = &connection;
+    args.server = server;
+    args.connection = connection;
 }
 
 fn test_send_data(args: *ThreadArgs) !void {
@@ -149,8 +149,8 @@ test "connect unconnected socket" {
 
     try std.testing.expect(s.state == Socket.State.STATE_CONNECTED);
 
-    if (args.connection) |connection| connection.stream.close();
-    if (args.server) |server| server.deinit();
+    if (args.connection) |*connection| connection.stream.close();
+    if (args.server) |*server| server.deinit();
 }
 
 test "recv data infinite timeout" {
@@ -175,6 +175,6 @@ test "recv data infinite timeout" {
     try std.testing.expect(received == expected.len);
     try std.testing.expect(std.mem.eql(u8, &buf, expected));
 
-    if (args.connection) |connection| connection.stream.close();
-    if (args.server) |server| server.deinit();
+    if (args.connection) |*connection| connection.stream.close();
+    if (args.server) |*server| server.deinit();
 }
