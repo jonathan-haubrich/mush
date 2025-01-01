@@ -65,7 +65,7 @@ pub const Socket = struct {
         self.stream.close();
     }
 
-    pub fn recv(self: *Self, buf: [*]const u8, len: usize, timeout: ?u32) !usize {
+    pub fn recv(self: *Self, buf: []u8, timeout: ?u32) !usize {
         if (State.STATE_DISCONNECTED == self.state) {
             return SocketError.InvalidState;
         }
@@ -73,7 +73,7 @@ pub const Socket = struct {
         var ret: i32 = 0;
         var bytes_transferred: u32 = 0;
         var flags: u32 = 0;
-        const wsabuf: ws2_32.WSABUF = .{ .len = @as(u31, @truncate(len)), .buf = @constCast(buf) };
+        const wsabuf: ws2_32.WSABUF = .{ .len = @as(u31, @truncate(buf.len)), .buf = @constCast(@ptrCast(buf)) };
 
         @memset(std.mem.asBytes(&self.overlapped), 0x00);
         if (0 == ws2_32.WSAResetEvent(self.event)) {
@@ -87,11 +87,7 @@ pub const Socket = struct {
             return SocketError.RecvFailed;
         }
 
-        var wait: u32 = win.INFINITE;
-
-        if (timeout) |t| {
-            wait = t * 1000;
-        }
+        const wait: u32 = if (timeout) |t| t * 1000 else win.INFINITE;
 
         try win.WaitForSingleObject(self.event, wait);
 
@@ -111,15 +107,30 @@ pub const Socket = struct {
     }
 };
 
+// Unit tests
+
 const ThreadArgs = struct {
     address: std.net.Address,
+    semaphore: std.Thread.Semaphore,
+    server: ?*std.net.Server = null,
+    connection: ?*std.net.Server.Connection = null,
 };
 
 fn test_start_server(args: ThreadArgs) !void {
     var server = try args.address.listen(.{});
+
+    args.semaphore.post();
     const connection = try server.accept();
 
-    connection.stream.close();
+    args.server = server;
+    args.connection = connection;
+}
+
+fn test_send_data(args: ThreadArgs) !void {
+    args.semaphore.post();
+    if (args.connection) |connection| {
+        connection.stream.write("HelloFromTest");
+    }
 }
 
 test "connect unconnected socket" {
@@ -128,14 +139,38 @@ test "connect unconnected socket" {
     const address = try std.net.Address.parseIp4("127.0.0.1", 4444);
     var s = try Socket.init(allocator, address);
 
-    const args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444) };
+    const args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444), .semaphore = std.Thread.Semaphore{} };
     const thread = try std.Thread.spawn(.{}, test_start_server, .{args});
 
-    std.time.sleep(1 * 1000 * 1000);
-
+    args.semaphore.wait();
     try s.connect();
 
     thread.join();
 
     try std.testing.expect(s.state == Socket.State.STATE_CONNECTED);
+
+    if (args.connection) |connection| connection.close();
+    if (args.server) |server| server.deinit();
+}
+
+test "recv data infinite timeout" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    const address = try std.net.Address.parseIp4("127.0.0.1", 4444);
+    var s = try Socket.init(allocator, address);
+
+    const args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444), .semaphore = std.Thread.Semaphore{} };
+    var thread = try std.Thread.spawn(.{}, test_start_server, .{args});
+
+    args.semaphore.wait();
+    try s.connect();
+    thread.join();
+
+    thread = try std.Thread.spawn(.{}, test_send_data, .{args});
+    args.semaphore.wait();
+    const buf: [4096]u8 = [_]u8{0} ** 4096;
+    try s.recv(buf, null);
+
+    if (args.connection) |connection| connection.close();
+    if (args.server) |server| server.deinit();
 }

@@ -13,7 +13,7 @@ pub fn main() !void {
 
     var buf: [4096]u8 = [_]u8{0} ** 4096;
 
-    const ret = s.recv(&buf, buf.len, 10) catch |err| def: {
+    const ret = s.recv(&buf, 10) catch |err| def: {
         std.debug.print("Socket.recv failed: {}", .{err});
 
         break :def 0;
