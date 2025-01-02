@@ -114,6 +114,7 @@ const ThreadArgs = struct {
     semaphore: std.Thread.Semaphore,
     server: ?std.net.Server = null,
     connection: ?std.net.Server.Connection = null,
+    test_data: []const u8,
 };
 
 fn test_start_server(args: *ThreadArgs) !void {
@@ -129,8 +130,12 @@ fn test_start_server(args: *ThreadArgs) !void {
 fn test_send_data(args: *ThreadArgs) !void {
     args.semaphore.post();
     if (args.connection) |connection| {
-        _ = try connection.stream.write("HelloFromTest");
+        _ = try connection.stream.write(args.test_data);
     }
+}
+
+fn test_send_data_failure(args: *ThreadArgs) !void {
+    args.semaphore.post();
 }
 
 test "connect unconnected socket" {
@@ -139,7 +144,7 @@ test "connect unconnected socket" {
     const address = try std.net.Address.parseIp4("127.0.0.1", 4444);
     var s = try Socket.init(allocator, address);
 
-    var args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444), .semaphore = std.Thread.Semaphore{} };
+    var args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444), .semaphore = std.Thread.Semaphore{}, .test_data = "" };
     const thread = try std.Thread.spawn(.{}, test_start_server, .{&args});
 
     args.semaphore.wait();
@@ -159,7 +164,8 @@ test "recv data infinite timeout" {
     const address = try std.net.Address.parseIp4("127.0.0.1", 4444);
     var s = try Socket.init(allocator, address);
 
-    var args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444), .semaphore = std.Thread.Semaphore{} };
+    const expected = "RecvDataInfiniteTimeout";
+    var args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444), .semaphore = std.Thread.Semaphore{}, .test_data = expected };
     var thread = try std.Thread.spawn(.{}, test_start_server, .{&args});
 
     args.semaphore.wait();
@@ -171,9 +177,63 @@ test "recv data infinite timeout" {
     var buf: [4096]u8 = [_]u8{0} ** 4096;
     const received = try s.recv(&buf, null);
 
-    const expected = "HelloFromTest";
     try std.testing.expect(received == expected.len);
-    try std.testing.expect(std.mem.eql(u8, buf[0..received], expected));
+    try std.testing.expect(std.mem.eql(u8, &buf, expected));
+
+    if (args.connection) |*connection| connection.stream.close();
+    if (args.server) |*server| server.deinit();
+}
+
+test "recv data 5s timeout" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    const address = try std.net.Address.parseIp4("127.0.0.1", 4444);
+    var s = try Socket.init(allocator, address);
+
+    const expected = "RecvData5secondTimeout";
+    var args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444), .semaphore = std.Thread.Semaphore{}, .test_data = expected };
+    var thread = try std.Thread.spawn(.{}, test_start_server, .{&args});
+
+    args.semaphore.wait();
+    try s.connect();
+    thread.join();
+
+    thread = try std.Thread.spawn(.{}, test_send_data, .{&args});
+    args.semaphore.wait();
+    var buf: [4096]u8 = [_]u8{0} ** 4096;
+    const received = try s.recv(&buf, 5);
+
+    try std.testing.expect(received == expected.len);
+    try std.testing.expect(std.mem.eql(u8, &buf, expected));
+
+    if (args.connection) |*connection| connection.stream.close();
+    if (args.server) |*server| server.deinit();
+}
+
+test "recv data timeout failure" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    const address = try std.net.Address.parseIp4("127.0.0.1", 4444);
+    var s = try Socket.init(allocator, address);
+
+    const expected = "RecvData5secondTimeout";
+    var args: ThreadArgs = .{ .address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 4444), .semaphore = std.Thread.Semaphore{}, .test_data = expected };
+    var thread = try std.Thread.spawn(.{}, test_start_server, .{&args});
+
+    args.semaphore.wait();
+    try s.connect();
+    thread.join();
+
+    thread = try std.Thread.spawn(.{}, test_send_data, .{&args});
+    args.semaphore.wait();
+    var buf: [4096]u8 = [_]u8{0} ** 4096;
+    const received = s.recv(&buf, 5) catch |err| blk: {
+        std.debug.print("recv data timeout failure: {any}\n", .{err});
+        //try std.testing.expect(@intFromError(err) == ws2_32.WinsockError.WSAETIMEDOUT);
+        break :blk 0;
+    };
+
+    try std.testing.expect(0 == received);
 
     if (args.connection) |*connection| connection.stream.close();
     if (args.server) |*server| server.deinit();
