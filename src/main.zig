@@ -1,5 +1,5 @@
 const std = @import("std");
-const socket = @import("socket.zig");
+const socket = @import("winsocket.zig");
 
 pub fn main() !void {
     var ha = std.heap.HeapAllocator.init();
