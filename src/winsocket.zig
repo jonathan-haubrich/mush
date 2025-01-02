@@ -100,6 +100,20 @@ pub fn recv(self: *Self, buf: []u8, timeout: ?u32) !usize {
     return bytes_transferred;
 }
 
+pub fn recvAll(self: *Self, buf: []u8, timeout: ?u32) !usize {
+    return self.recvAtLeast(buf, buf.len, timeout);
+}
+
+pub fn recvAtLeast(self: *Self, buf: []u8, len: usize, timeout: ?u32) !usize {
+    var index: usize = 0;
+    while (index < len) {
+        const amt = try self.recv(buf[index..], timeout);
+        if (amt == 0) break;
+        index += amt;
+    }
+    return index;
+}
+
 pub fn send(self: *Self, buf: []u8) !usize {
     if (State.STATE_DISCONNECTED == self.state) {
         return WinSocketError.InvalidState;
@@ -163,6 +177,18 @@ fn test_recv_data(args: *ThreadArgs) !void {
     args.semaphore.post();
     if (args.connection) |connection| {
         _ = try connection.stream.read(args.out_data);
+    }
+}
+
+fn test_recvAll_send_data(args: *ThreadArgs) !void {
+    args.semaphore.post();
+    if (args.connection) |connection| {
+        for (args.test_data) |c| {
+            const buf: [1]u8 = .{c};
+            _ = try connection.stream.write(&buf);
+            // sleep for 100 milliseconds
+            std.time.sleep(1 * 1000 * 100);
+        }
     }
 }
 
@@ -306,6 +332,68 @@ test "send data" {
 
     try std.testing.expect(sent == expected.len);
     try std.testing.expect(std.mem.eql(u8, buf[0..sent], expected));
+
+    if (args.connection) |*connection| connection.stream.close();
+    if (args.server) |*server| server.deinit();
+}
+
+test "recv partial data failure" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    const address = try std.net.Address.parseIp4("127.0.0.9", 4449);
+    var s = try init(allocator, address);
+
+    const expected = "RecvPartialDataFilure";
+    var args: ThreadArgs = .{
+        .address = address,
+        .semaphore = std.Thread.Semaphore{},
+        .test_data = expected,
+    };
+    var thread = try std.Thread.spawn(.{}, test_start_server, .{&args});
+
+    args.semaphore.wait();
+    try s.connect();
+    thread.join();
+
+    thread = try std.Thread.spawn(.{}, test_recvAll_send_data, .{&args});
+    args.semaphore.wait();
+    var buf: [4096]u8 = [_]u8{0} ** 4096;
+    const received = try s.recv(&buf, null);
+    thread.join();
+
+    try std.testing.expect(received > 0);
+    try std.testing.expect(received < expected.len);
+
+    if (args.connection) |*connection| connection.stream.close();
+    if (args.server) |*server| server.deinit();
+}
+
+test "recvAll data" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    const address = try std.net.Address.parseIp4("127.0.0.10", 4450);
+    var s = try init(allocator, address);
+
+    const expected = "RecvPartialDataFilure";
+    var args: ThreadArgs = .{
+        .address = address,
+        .semaphore = std.Thread.Semaphore{},
+        .test_data = expected,
+    };
+    var thread = try std.Thread.spawn(.{}, test_start_server, .{&args});
+
+    args.semaphore.wait();
+    try s.connect();
+    thread.join();
+
+    thread = try std.Thread.spawn(.{}, test_recvAll_send_data, .{&args});
+    args.semaphore.wait();
+    var buf: [4096]u8 = [_]u8{0} ** 4096;
+    const received = try s.recvAll(buf[0..expected.len], null);
+    thread.join();
+
+    try std.testing.expect(received == expected.len);
+    try std.testing.expect(std.mem.eql(u8, buf[0..received], expected));
 
     if (args.connection) |*connection| connection.stream.close();
     if (args.server) |*server| server.deinit();
