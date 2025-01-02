@@ -423,7 +423,7 @@ test "recvAll data" {
 }
 
 test "writer fmt" {
-    const address = try std.net.Address.parseIp4("127.0.0.8", 4448);
+    const address = try std.net.Address.parseIp4("127.0.0.11", 4451);
     var s = try init(address);
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
