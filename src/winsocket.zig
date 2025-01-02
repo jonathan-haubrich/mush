@@ -14,6 +14,8 @@ const WinSocketError = error{
     SendFailed,
 };
 
+pub const Error = WinSocketError;
+
 const State = enum(u32) {
     STATE_DISCONNECTED = 0,
     STATE_CONNECTED,
@@ -123,7 +125,7 @@ pub fn recvOne(self: *Self, timeout: ?u32) !u8 {
     return char[0];
 }
 
-pub fn send(self: *Self, buf: []u8) !usize {
+pub fn send(self: *Self, buf: []const u8) !usize {
     if (State.STATE_DISCONNECTED == self.state) {
         return WinSocketError.InvalidState;
     }
@@ -142,6 +144,17 @@ pub fn send(self: *Self, buf: []u8) !usize {
     return bytes_transferred;
 }
 
+pub fn writeAll(self: Self, buf: []const u8) !void {
+    var mutable_self = @constCast(&self);
+    _ = try mutable_self.send(buf);
+}
+
+pub fn writeBytesNTimes(self: Self, buf: []const u8, n: usize) !void {
+    for (0..n) |_| {
+        try self.writeAll(buf);
+    }
+}
+
 pub fn deinit(self: *Self) void {
     if (ws2_32.INVALID_SOCKET != self.socket) {
         _ = ws2_32.closesocket(self.socket);
@@ -158,6 +171,7 @@ const ThreadArgs = struct {
     server: ?std.net.Server = null,
     connection: ?std.net.Server.Connection = null,
     test_data: []const u8 = "",
+    test_data_len: usize = 0,
     out_data: []u8 = undefined,
 };
 
@@ -186,6 +200,20 @@ fn test_recv_data(args: *ThreadArgs) !void {
     args.semaphore.post();
     if (args.connection) |connection| {
         _ = try connection.stream.read(args.out_data);
+    }
+}
+
+fn test_recv_fmt_data(args: *ThreadArgs) !void {
+    args.semaphore.post();
+    if (args.connection) |connection| {
+        var index: usize = 0;
+        var amt = try connection.stream.read(args.out_data[index..]);
+        index += amt;
+        while (amt != 0) {
+            amt = try connection.stream.read(args.out_data[index..]);
+            index += amt;
+        }
+        args.test_data_len = index;
     }
 }
 
@@ -389,6 +417,44 @@ test "recvAll data" {
 
     try std.testing.expect(received == expected.len);
     try std.testing.expect(std.mem.eql(u8, buf[0..received], expected));
+
+    if (args.connection) |*connection| connection.stream.close();
+    if (args.server) |*server| server.deinit();
+}
+
+test "writer fmt" {
+    const address = try std.net.Address.parseIp4("127.0.0.8", 4448);
+    var s = try init(address);
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+
+    const format_string = "WriterFmtTest: {d} {s}";
+    const format_args = .{ 0x1000, "TestFormatString" };
+    var array = std.ArrayList(u8).init(allocator);
+    try std.fmt.format(array.writer(), format_string, format_args);
+    const expected = array.items;
+    var buf: [1024]u8 = [_]u8{0} ** 1024;
+    var args: ThreadArgs = .{
+        .address = address,
+        .semaphore = std.Thread.Semaphore{},
+        .out_data = &buf,
+    };
+    var thread = try std.Thread.spawn(.{}, test_start_server, .{&args});
+
+    args.semaphore.wait();
+    try s.connect();
+    thread.join();
+
+    thread = try std.Thread.spawn(.{}, test_recv_fmt_data, .{&args});
+    args.semaphore.wait();
+    try std.fmt.format(s, format_string, format_args);
+    s.deinit();
+
+    thread.join();
+
+    try std.testing.expectEqual(args.test_data_len, expected.len);
+    try std.testing.expect(std.mem.eql(u8, buf[0..args.test_data_len], expected));
 
     if (args.connection) |*connection| connection.stream.close();
     if (args.server) |*server| server.deinit();
