@@ -146,7 +146,15 @@ pub fn send(self: *Self, buf: []const u8) !usize {
 
 pub fn writeAll(self: Self, buf: []const u8) !void {
     var mutable_self = @constCast(&self);
-    _ = try mutable_self.send(buf);
+    var index: usize = 0;
+    while (index < buf.len) {
+        const amt = try mutable_self.send(buf[index..]);
+        index += amt;
+    }
+}
+
+pub fn write(self: Self, buf: []const u8) !void {
+    return self.writeAll(buf);
 }
 
 pub fn writeBytesNTimes(self: Self, buf: []const u8, n: usize) !void {
@@ -432,6 +440,8 @@ test "writer fmt" {
     const format_string = "WriterFmtTest: {d} {s}";
     const format_args = .{ 0x1000, "TestFormatString" };
     var array = std.ArrayList(u8).init(allocator);
+    defer array.deinit();
+
     try std.fmt.format(array.writer(), format_string, format_args);
     const expected = array.items;
     var buf: [1024]u8 = [_]u8{0} ** 1024;

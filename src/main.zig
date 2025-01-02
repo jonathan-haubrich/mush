@@ -1,6 +1,7 @@
 const std = @import("std");
 const WinSocket = @import("winsocket.zig");
 const RemoteTty = @import("remotetty.zig");
+const CommandLs = @import("commands/ls.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -17,6 +18,8 @@ pub fn main() !void {
 
     const commandline = try rtty.get_command_line();
     std.debug.print("commandline: {s}\n", .{commandline});
+
+    try CommandLs.ls("C:\\Program Files", false, winsock);
 
     allocator.free(commandline);
 }
