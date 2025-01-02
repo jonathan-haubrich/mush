@@ -1,23 +1,22 @@
 const std = @import("std");
-const socket = @import("winsocket.zig");
+const WinSocket = @import("winsocket.zig");
+const RemoteTty = @import("remotetty.zig");
 
 pub fn main() !void {
-    var ha = std.heap.HeapAllocator.init();
-    const allocator = ha.allocator();
-
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
     const address = try std.net.Address.parseIp("172.20.42.248", 4444);
+    var winsock = try WinSocket.init(address);
+    defer winsock.deinit();
 
-    var s = try socket.Socket.init(allocator, address);
+    try winsock.connect();
 
-    try s.connect();
+    var rtty = try RemoteTty.init(&winsock, allocator);
+    defer rtty.deinit();
 
-    var buf: [4096]u8 = [_]u8{0} ** 4096;
+    const commandline = try rtty.get_command_line();
+    std.debug.print("commandline: {s}\n", .{commandline});
 
-    const ret = s.recv(&buf, 10) catch |err| def: {
-        std.debug.print("Socket.recv failed: {}", .{err});
-
-        break :def 0;
-    };
-
-    std.debug.print("Received {d} bytes: {s}", .{ ret, buf });
+    allocator.free(commandline);
 }
