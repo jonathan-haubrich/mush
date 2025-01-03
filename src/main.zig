@@ -1,7 +1,7 @@
 const std = @import("std");
 const WinSocket = @import("winsocket.zig");
 const RemoteTty = @import("remotetty.zig");
-const CommandLs = @import("commands/ls.zig");
+const Commands = @import("commands/commands.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -16,10 +16,29 @@ pub fn main() !void {
     var rtty = try RemoteTty.init(&winsock, allocator);
     defer rtty.deinit();
 
-    const commandline = try rtty.get_command_line();
-    std.debug.print("commandline: {s}\n", .{commandline});
+    while (true) {
+        const commandline = rtty.get_command_line() catch |err| {
+            std.debug.print("Failed to get command line: {}\n", .{err});
+            continue;
+        };
 
-    try CommandLs.ls("C:\\Program Files", false, winsock);
+        std.debug.print("commandline: {s}\n", .{commandline});
 
-    allocator.free(commandline);
+        var args_iter = try std.process.ArgIteratorGeneral(.{ .comments = true }).init(allocator, commandline);
+
+        const command = args_iter.next();
+        if (command) |c| {
+            std.debug.print("Got command: {s}\n", .{c});
+        }
+
+        Commands.Ls(&args_iter, winsock) catch |err| {
+            std.debug.print("Commands.Ls failed: {}\n", .{err});
+            args_iter.deinit();
+            allocator.free(commandline);
+            return err;
+        };
+
+        args_iter.deinit();
+        allocator.free(commandline);
+    }
 }
