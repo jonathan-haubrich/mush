@@ -4,29 +4,40 @@ pub const ParseError = error{
     ArgumentMissingName,
     ArgumentMissingValue,
     ArgumentNameCollision,
+    ArgumentPositionalOutOfRange,
 };
 
 const ParamType = enum {
     flag,
+    named,
+    positional,
+};
+
+const ParamValueType = enum {
+    flag,
     value,
 };
 
-const ParamValue = union(ParamType) {
+const ParamValue = union(ParamValueType) {
     flag: bool,
-    value: []u8,
+    value: ?[]u8,
 };
 
 const Param = struct {
     const Self = @This();
 
     val: ParamValue,
+    typ: ParamType,
 
     name: ?[]const u8,
     longname: ?[]const u8,
+    required: bool,
 
-    pub fn clone(self: *Self, allocator: std.mem.Allocator) !Self {
+    pub fn clone(self: Self, allocator: std.mem.Allocator) !Self {
         var param: Param = .{
             .val = self.val,
+            .typ = self.typ,
+            .required = self.required,
             .name = null,
             .longname = null,
         };
@@ -39,8 +50,10 @@ const Param = struct {
         }
 
         switch (self.val) {
-            ParamType.value => |val| {
-                param.val.value = try allocator.dupe(u8, val);
+            ParamValueType.value => |val| {
+                if (val) |v| {
+                    param.val.value = try allocator.dupe(u8, v);
+                }
             },
             else => {},
         }
@@ -53,7 +66,7 @@ const Param = struct {
     }
 
     pub fn value(self: Self) []const u8 {
-        return self.val.value;
+        return self.val.value.?;
     }
 };
 
@@ -65,32 +78,75 @@ pub const ArgumentNamespace = struct {
     entries: std.ArrayList(Param),
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) Self {
+    pub fn init(allocator: std.mem.Allocator, entries: std.ArrayList(Param)) !Self {
+        var _entries = try std.ArrayList(Param).initCapacity(allocator, entries.capacity);
+        var args_map = std.StringHashMap(Param).init(allocator);
+        var positionals = std.ArrayList(Param).init(allocator);
+
+        for (entries.items) |entry| {
+            const cloned = try entry.clone(allocator);
+            try _entries.append(cloned);
+
+            if (entry.typ == .positional) {
+                try positionals.append(cloned);
+            } else {
+                if (entry.name) |name| {
+                    try args_map.put(name, cloned);
+                }
+                if (entry.longname) |longname| {
+                    try args_map.put(longname, cloned);
+                }
+            }
+        }
+
         return .{
-            .args = std.StringHashMap(Param).init(allocator),
-            .entries = std.ArrayList(Param).init(allocator),
-            .positionals = std.ArrayList(Param).init(allocator),
+            .args = args_map,
+            .entries = _entries,
+            .positionals = positionals,
             .allocator = allocator,
         };
     }
 
-    pub fn add(self: *Self, arg: *Param) !void {
-        const entry = try arg.clone(self.allocator);
-        if (entry.name == null and entry.longname == null) {
-            try self.positionals.append(entry);
-        } else {
-            if (entry.name) |name| {
-                try self.args.put(name, entry);
-            }
-            if (entry.longname) |longname| {
-                try self.args.put(longname, entry);
-            }
-        }
-        try self.entries.append(entry);
-    }
-
     pub fn get(self: Self, name: []const u8) Param {
         return self.args.get(name).?;
+    }
+
+    pub fn set_named_value(self: Self, name: []const u8, value: []const u8) !bool {
+        var param = self.getFallible(name);
+        if (param) |*p| {
+            // if param was already set, make sure we don't leak
+            if (p.val.value) |v| {
+                self.allocator.free(v);
+            }
+            p.val.value = try self.allocator.dupe(u8, value);
+            return true;
+        }
+
+        return false;
+    }
+
+    pub fn set_positional_value(self: *Self, value: []const u8) !bool {
+        for (self.positionals.items) |*positional| {
+            if (positional.val.value) |_| {
+                continue;
+            } else {
+                positional.val.value = try self.allocator.dupe(u8, value);
+                return true;
+            }
+        }
+
+        // no positionals or unassigned positionals found
+        return error.ArgumentPositionalOutOfRange;
+    }
+
+    pub fn set_flag(self: Self, name: []const u8) bool {
+        var param = self.getFallible(name);
+        if (param) |*p| {
+            p.val.flag = !p.val.flag;
+            return true;
+        }
+
+        return false;
     }
 
     pub fn getFallible(self: Self, name: []const u8) ?Param {
@@ -111,8 +167,10 @@ pub const ArgumentNamespace = struct {
             }
 
             switch (entry.val) {
-                ParamType.value => |val| {
-                    self.allocator.free(val);
+                ParamValueType.value => |val| {
+                    if (val) |v| {
+                        self.allocator.free(v);
+                    }
                 },
                 else => {},
             }
@@ -145,9 +203,11 @@ pub const ArgumentParser = struct {
         var param: Param = .{
             .name = null,
             .longname = null,
+            .required = true,
             .val = .{
                 .flag = default,
             },
+            .typ = .flag,
         };
 
         if (name) |n| {
@@ -160,17 +220,15 @@ pub const ArgumentParser = struct {
         try self.options.append(param);
     }
 
-    pub fn addValueArgument(self: *Self, name: ?[]const u8, longname: ?[]const u8) !void {
-        if (null == name and null == longname) {
-            return error.ArgumentMissingName;
-        }
-
+    fn addArgument(self: *Self, name: ?[]const u8, longname: ?[]const u8, required: bool, typ: ParamType) !void {
         var param: Param = .{
             .name = null,
             .longname = null,
+            .required = required,
             .val = .{
-                .value = undefined,
+                .value = null,
             },
+            .typ = typ,
         };
 
         if (name) |n| {
@@ -181,6 +239,22 @@ pub const ArgumentParser = struct {
         }
 
         try self.options.append(param);
+    }
+
+    pub fn addValueArgument(self: *Self, name: ?[]const u8, longname: ?[]const u8, required: bool) !void {
+        if (null == name and null == longname) {
+            return error.ArgumentMissingName;
+        }
+
+        return self.addArgument(name, longname, required, .named);
+    }
+
+    pub fn addPositionalArgument(self: *Self, name: ?[]const u8, longname: ?[]const u8, required: bool) !void {
+        if (null == name and null == longname) {
+            return error.ArgumentMissingName;
+        }
+
+        return self.addArgument(name, longname, required, .positional);
     }
 
     fn findOption(self: *Self, name: []const u8) ?*Param {
@@ -212,99 +286,33 @@ pub const ArgumentParser = struct {
     }
 
     pub fn parseArgs(self: *Self, cmd_line: []const u8) !ArgumentNamespace {
-        var namespace: ArgumentNamespace = ArgumentNamespace.init(self.allocator);
         var iterator = try std.process.ArgIteratorGeneral(.{ .comments = true }).init(self.allocator, cmd_line);
         defer iterator.deinit();
 
-        while (iterator.next()) |arg| {
-            const trimmed = trim_left(arg, '-');
-
-            if (arg.len > 0 and arg[0] != '-') {
-                // got a positional
-                const duped = try self.allocator.dupe(u8, trimmed);
-                defer self.allocator.free(duped);
-                var param: Param = .{
-                    .name = null,
-                    .longname = null,
-                    .val = .{ .value = duped },
-                };
-                try namespace.add(&param);
-                continue;
-            }
-
-            // otherwise handle named params
-            const option = self.findOption(trimmed);
-            if (option) |o| {
-                switch (o.*.val) {
-                    ParamType.flag => {
-                        var param = namespace.getFallible(trimmed);
-                        if (param) |*p| {
-                            p.*.val.flag = !p.*.val.flag;
-                        } else {
-                            o.*.val.flag = !o.*.val.flag;
-                            try namespace.add(o);
-                        }
-                    },
-                    ParamType.value => |*val| {
-                        const value = iterator.next() orelse return error.ArgumentMissingValue;
-                        var param = namespace.getFallible(trimmed);
-                        if (param) |*p| {
-                            self.allocator.free(p.*.val.value);
-                            p.*.val.value = try self.allocator.dupe(u8, value);
-                        } else {
-                            val.* = try self.allocator.dupe(u8, value);
-                            try namespace.add(o);
-                        }
-                    },
-                }
-            }
-        }
-
-        return namespace;
+        return self.parseArgsIterator(iterator);
     }
 
     pub fn parseArgsIterator(self: *Self, iterator: anytype) !ArgumentNamespace {
-        var namespace: ArgumentNamespace = ArgumentNamespace.init(self.allocator);
+        var namespace: ArgumentNamespace = try ArgumentNamespace.init(self.allocator, self.options);
 
         while (iterator.next()) |arg| {
-            const trimmed = trim_left(arg, '-');
-
             if (arg.len > 0 and arg[0] != '-') {
                 // got a positional
-                const duped = try self.allocator.dupe(u8, trimmed);
-                defer self.allocator.free(duped);
-                var param: Param = .{
-                    .name = null,
-                    .longname = null,
-                    .val = .{ .value = duped },
-                };
-                try namespace.add(&param);
+                _ = try namespace.set_positional_value(arg);
                 continue;
             }
 
             // otherwise handle named params
-            const option = self.findOption(trimmed);
-            if (option) |o| {
-                switch (o.*.val) {
-                    ParamType.flag => {
-                        var param = namespace.getFallible(trimmed);
-                        if (param) |*p| {
-                            p.*.val.flag = !p.*.val.flag;
-                        } else {
-                            o.*.val.flag = !o.*.val.flag;
-                            try namespace.add(o);
-                        }
+            const trimmed = trim_left(arg, '-');
+            const param = namespace.getFallible(trimmed);
+            if (param) |*p| {
+                switch (p.*.val) {
+                    ParamValueType.flag => {
+                        _ = namespace.set_flag(trimmed);
                     },
-                    ParamType.value => |*val| {
+                    ParamValueType.value => {
                         const value = iterator.next() orelse return error.ArgumentMissingValue;
-                        var param = namespace.getFallible(trimmed);
-                        if (param) |*p| {
-                            self.allocator.free(p.*.val.value);
-                            p.*.val.value = try self.allocator.dupe(u8, value);
-                        } else {
-                            val.* = try self.allocator.dupe(u8, value);
-                            try namespace.add(o);
-                        }
+                        _ = try namespace.set_named_value(trimmed, value);
                     },
                 }
             }
@@ -322,8 +330,10 @@ pub const ArgumentParser = struct {
                 self.allocator.free(longname);
             }
             switch (o.val) {
-                ParamType.value => |val| {
-                    self.allocator.free(val);
+                ParamValueType.value => |val| {
+                    if (val) |v| {
+                        self.allocator.free(v);
+                    }
                 },
                 else => {},
             }
@@ -333,77 +343,6 @@ pub const ArgumentParser = struct {
     }
 };
 
-fn createBoolParam(comptime name: []const u8, parsed: bool) Param {
-    return .{
-        .val = .{
-            .flag = parsed,
-        },
-        .name = name,
-        .longname = name,
-    };
-}
-
-const Options = std.StaticStringMap(Param).initComptime(.{
-    .{ "a", .{ .val = .{ .flag = true }, .name = "a", .longname = "ascii" } },
-    .{ "h", .{ .val = .{ .flag = true }, .name = "h", .longname = "human-readable" } },
-});
-
-test "ArgParse test" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var params = std.ArrayList(Param).init(allocator);
-    defer params.deinit();
-
-    var iter = try std.process.ArgIteratorGeneral(.{}).init(allocator, "ls -a -h");
-    defer iter.deinit();
-    while (iter.next()) |arg| {
-        const option = Options.get(arg);
-        if (option) |o| {
-            switch (o.val) {
-                ParamValue.flag => |val| {
-                    try params.append(.{
-                        .name = try allocator.dupe(u8, arg),
-                        .longname = try allocator.dupe(u8, arg),
-                        .val = .{
-                            .flag = val,
-                        },
-                    });
-                },
-                ParamValue.value => |_| {
-                    // would have to get the next arg from iter here
-                    try params.append(.{
-                        .name = try allocator.dupe(u8, arg),
-                        .longname = try allocator.dupe(u8, arg),
-                        .val = .{
-                            .value = try allocator.dupe(u8, arg),
-                        },
-                    });
-                },
-            }
-        }
-    }
-
-    const param = createBoolParam("t", false);
-    std.debug.print("param: {any}\n", .{param});
-
-    for (params.items) |p| {
-        if (p.name) |name| {
-            allocator.free(name);
-        }
-        if (p.longname) |longname| {
-            allocator.free(longname);
-        }
-        switch (p.val) {
-            ParamValue.value => |val| {
-                allocator.free(val);
-            },
-            else => {},
-        }
-    }
-}
-
 test "ArgumentParser add options" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -412,7 +351,7 @@ test "ArgumentParser add options" {
     defer parser.deinit();
 
     try parser.addBoolArgument("f", "force", false);
-    try parser.addValueArgument("o", "outfile");
+    try parser.addValueArgument("o", "outfile", true);
 
     std.debug.print("Options: {any}\n", .{parser.options});
 }
@@ -425,7 +364,7 @@ test "ArgumentParser test argParse" {
     defer parser.deinit();
 
     try parser.addBoolArgument("f", "force", false);
-    try parser.addValueArgument("o", "outfile");
+    try parser.addValueArgument("o", "outfile", true);
 
     var args = try parser.parseArgs("ls -f --outfile filename pos1 pos2");
     defer args.deinit();
