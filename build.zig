@@ -22,6 +22,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const argparse_mod = b.addModule(
+        "argparse",
+        .{
+            .root_source_file = .{
+                .src_path = .{ .owner = b, .sub_path = "src/argparse.zig" },
+            },
+        },
+    );
+    exe.root_module.addImport("argparse", argparse_mod);
+
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).

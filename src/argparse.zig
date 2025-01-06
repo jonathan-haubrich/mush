@@ -57,7 +57,7 @@ const Param = struct {
     }
 };
 
-const ArgumentNamespace = struct {
+pub const ArgumentNamespace = struct {
     const Self = @This();
 
     args: std.StringHashMap(Param),
@@ -89,15 +89,15 @@ const ArgumentNamespace = struct {
         try self.entries.append(entry);
     }
 
-    pub fn get(self: *Self, name: []const u8) Param {
+    pub fn get(self: Self, name: []const u8) Param {
         return self.args.get(name).?;
     }
 
-    pub fn getFallible(self: *Self, name: []const u8) ?Param {
+    pub fn getFallible(self: Self, name: []const u8) ?Param {
         return self.args.get(name);
     }
 
-    pub fn contains(self: *Self, name: []const u8) bool {
+    pub fn contains(self: Self, name: []const u8) bool {
         return self.args.contains(name);
     }
 
@@ -124,7 +124,7 @@ const ArgumentNamespace = struct {
     }
 };
 
-const ArgumentParser = struct {
+pub const ArgumentParser = struct {
     const Self = @This();
 
     allocator: std.mem.Allocator,
@@ -215,6 +215,56 @@ const ArgumentParser = struct {
         var namespace: ArgumentNamespace = ArgumentNamespace.init(self.allocator);
         var iterator = try std.process.ArgIteratorGeneral(.{ .comments = true }).init(self.allocator, cmd_line);
         defer iterator.deinit();
+
+        while (iterator.next()) |arg| {
+            const trimmed = trim_left(arg, '-');
+
+            if (arg.len > 0 and arg[0] != '-') {
+                // got a positional
+                const duped = try self.allocator.dupe(u8, trimmed);
+                defer self.allocator.free(duped);
+                var param: Param = .{
+                    .name = null,
+                    .longname = null,
+                    .val = .{ .value = duped },
+                };
+                try namespace.add(&param);
+                continue;
+            }
+
+            // otherwise handle named params
+            const option = self.findOption(trimmed);
+            if (option) |o| {
+                switch (o.*.val) {
+                    ParamType.flag => {
+                        var param = namespace.getFallible(trimmed);
+                        if (param) |*p| {
+                            p.*.val.flag = !p.*.val.flag;
+                        } else {
+                            o.*.val.flag = !o.*.val.flag;
+                            try namespace.add(o);
+                        }
+                    },
+                    ParamType.value => |*val| {
+                        const value = iterator.next() orelse return error.ArgumentMissingValue;
+                        var param = namespace.getFallible(trimmed);
+                        if (param) |*p| {
+                            self.allocator.free(p.*.val.value);
+                            p.*.val.value = try self.allocator.dupe(u8, value);
+                        } else {
+                            val.* = try self.allocator.dupe(u8, value);
+                            try namespace.add(o);
+                        }
+                    },
+                }
+            }
+        }
+
+        return namespace;
+    }
+
+    pub fn parseArgsIterator(self: *Self, iterator: anytype) !ArgumentNamespace {
+        var namespace: ArgumentNamespace = ArgumentNamespace.init(self.allocator);
 
         while (iterator.next()) |arg| {
             const trimmed = trim_left(arg, '-');
