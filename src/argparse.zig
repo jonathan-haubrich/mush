@@ -3,6 +3,7 @@ const std = @import("std");
 pub const ParseError = error{
     ArgumentMissingName,
     ArgumentMissingValue,
+    ArgumentNameCollision,
 };
 
 const ParamType = enum {
@@ -24,7 +25,6 @@ const Param = struct {
     longname: ?[]const u8,
 
     pub fn clone(self: *Self, allocator: std.mem.Allocator) !Self {
-        std.debug.print("Cloning: {any}\n", .{self});
         var param: Param = .{
             .val = self.val,
             .name = null,
@@ -200,17 +200,44 @@ const ArgumentParser = struct {
         return null;
     }
 
+    fn trim_left(s: []const u8, char: u8) []const u8 {
+        var index: usize = 0;
+        if (index < s.len and char == s[index]) {
+            index += 1;
+        }
+        if (index < s.len and char == s[index]) {
+            index += 1;
+        }
+        return s[index..];
+    }
+
     pub fn parseArgs(self: *Self, cmd_line: []const u8) !ArgumentNamespace {
         var namespace: ArgumentNamespace = ArgumentNamespace.init(self.allocator);
         var iterator = try std.process.ArgIteratorGeneral(.{ .comments = true }).init(self.allocator, cmd_line);
         defer iterator.deinit();
 
         while (iterator.next()) |arg| {
-            const option = self.findOption(arg);
+            const trimmed = trim_left(arg, '-');
+
+            if (arg.len > 0 and arg[0] != '-') {
+                // got a positional
+                const duped = try self.allocator.dupe(u8, trimmed);
+                defer self.allocator.free(duped);
+                var param: Param = .{
+                    .name = null,
+                    .longname = null,
+                    .val = .{ .value = duped },
+                };
+                try namespace.add(&param);
+                continue;
+            }
+
+            // otherwise handle named params
+            const option = self.findOption(trimmed);
             if (option) |o| {
                 switch (o.*.val) {
                     ParamType.flag => {
-                        var param = namespace.getFallible(arg);
+                        var param = namespace.getFallible(trimmed);
                         if (param) |*p| {
                             p.*.val.flag = !p.*.val.flag;
                         } else {
@@ -220,7 +247,7 @@ const ArgumentParser = struct {
                     },
                     ParamType.value => |*val| {
                         const value = iterator.next() orelse return error.ArgumentMissingValue;
-                        var param = namespace.getFallible(arg);
+                        var param = namespace.getFallible(trimmed);
                         if (param) |*p| {
                             self.allocator.free(p.*.val.value);
                             p.*.val.value = try self.allocator.dupe(u8, value);
@@ -230,16 +257,6 @@ const ArgumentParser = struct {
                         }
                     },
                 }
-            } else {
-                // got a positional
-                const duped = try self.allocator.dupe(u8, arg);
-                defer self.allocator.free(duped);
-                var param: Param = .{
-                    .name = null,
-                    .longname = null,
-                    .val = .{ .value = duped },
-                };
-                try namespace.add(&param);
             }
         }
 
@@ -277,8 +294,8 @@ fn createBoolParam(comptime name: []const u8, parsed: bool) Param {
 }
 
 const Options = std.StaticStringMap(Param).initComptime(.{
-    .{ "-a", .{ .val = .{ .flag = true }, .name = "-a", .longname = "--ascii" } },
-    .{ "-h", .{ .val = .{ .flag = true }, .name = "-h", .longname = "--human-readable" } },
+    .{ "a", .{ .val = .{ .flag = true }, .name = "a", .longname = "ascii" } },
+    .{ "h", .{ .val = .{ .flag = true }, .name = "h", .longname = "human-readable" } },
 });
 
 test "ArgParse test" {
@@ -318,7 +335,7 @@ test "ArgParse test" {
         }
     }
 
-    const param = createBoolParam("-t", false);
+    const param = createBoolParam("t", false);
     std.debug.print("param: {any}\n", .{param});
 
     for (params.items) |p| {
@@ -344,8 +361,8 @@ test "ArgumentParser add options" {
     var parser = ArgumentParser.init(allocator);
     defer parser.deinit();
 
-    try parser.addBoolArgument("-f", "--force", false);
-    try parser.addValueArgument("-o", "--outfile");
+    try parser.addBoolArgument("f", "force", false);
+    try parser.addValueArgument("o", "outfile");
 
     std.debug.print("Options: {any}\n", .{parser.options});
 }
@@ -357,23 +374,23 @@ test "ArgumentParser test argParse" {
     var parser = ArgumentParser.init(allocator);
     defer parser.deinit();
 
-    try parser.addBoolArgument("-f", "--force", false);
-    try parser.addValueArgument("-o", "--outfile");
+    try parser.addBoolArgument("f", "force", false);
+    try parser.addValueArgument("o", "outfile");
 
     var args = try parser.parseArgs("ls -f --outfile filename pos1 pos2");
     defer args.deinit();
 
-    const param1 = args.get("-f");
+    const param1 = args.get("f");
     std.debug.print("param1: {any}\n", .{param1});
     std.debug.print("param1.flag(): {}\n", .{param1.flag()});
     try std.testing.expectEqual(param1.flag(), true);
-    try std.testing.expectEqual(args.get("--force").flag(), true);
+    try std.testing.expectEqual(args.get("force").flag(), true);
 
-    const param2 = args.get("--outfile");
+    const param2 = args.get("outfile");
     std.debug.print("param2: {any}\n", .{param2});
     std.debug.print("param2.value(): {s}\n", .{param2.value()});
     try std.testing.expectEqualStrings(param2.value(), "filename");
-    try std.testing.expectEqualStrings(args.get("-o").value(), "filename");
+    try std.testing.expectEqualStrings(args.get("o").value(), "filename");
 
     for (args.positionals.items, 0..) |param, i| {
         std.debug.print("Positional #{d}: {s}\n", .{ i, param.value() });
