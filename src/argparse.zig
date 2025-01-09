@@ -5,6 +5,7 @@ pub const ParseError = error{
     ArgumentMissingValue,
     ArgumentNameCollision,
     ArgumentPositionalOutOfRange,
+    ArgumentMissingRequired,
 };
 
 const ParamType = enum {
@@ -86,6 +87,24 @@ const Param = struct {
     pub fn value(self: Self) []const u8 {
         return self.val.value.?;
     }
+
+    pub fn format(v: *const Param, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        try writer.print(
+            \\ Param:
+            \\    Name: {?s}
+            \\    Longname: {?s}
+            \\    Type: {any}
+            \\    Required: {any}
+            \\    Value:
+        , .{ v.name, v.longname, v.typ, v.required });
+        switch (v.val) {
+            ParamValueType.value => |val| {
+                try writer.print("{?s}", .{val});
+            },
+            else => try writer.print("{any}", .{v.flag()}),
+        }
+        try writer.print("\n", .{});
+    }
 };
 
 pub const ArgumentNamespace = struct {
@@ -121,13 +140,6 @@ pub const ArgumentNamespace = struct {
             }
         }
 
-        var key_iterator = args_map.keyIterator();
-        std.debug.print("[ArgumentNamespace.init: args.ctx addr: {*}]===== Have keys:\n", .{&args_map.ctx});
-        while (key_iterator.next()) |key| {
-            std.debug.print("\t{s}\n", .{key.*});
-        }
-        std.debug.print("[ArgumentNamespace.init: args.unmanaged addr: {*}]===== Have keys:\n", .{&args_map.unmanaged});
-
         return .{
             .args = args_map,
             .entries = _entries,
@@ -136,13 +148,6 @@ pub const ArgumentNamespace = struct {
     }
 
     pub fn get(self: Self, name: []const u8) Param {
-        var key_iterator = self.args.keyIterator();
-        std.debug.print("[ArgumentNamespace.get: self.args.ctx addr: {*}]===== Have keys:\n", .{&self.args.ctx});
-        while (key_iterator.next()) |key| {
-            std.debug.print("\t{s}\n", .{key.*});
-        }
-        std.debug.print("[ArgumentNamespace.init: args.unmanaged addr: {*}]===== Have keys:\n", .{&self.args.unmanaged});
-
         return self.args.get(name).?.*;
     }
 
@@ -211,6 +216,25 @@ pub const ArgumentNamespace = struct {
         return self.args.contains(name);
     }
 
+    pub fn validate(self: Self) !bool {
+        std.debug.print("In ArgumentNamespace.validate\n", .{});
+        for (self.entries.items) |entry| {
+            std.debug.print("{any}\n", .{entry});
+            if (entry.required) {
+                switch (entry.val) {
+                    ParamValueType.value => {
+                        if (null == entry.val.value) {
+                            return error.ArgumentMissingRequired;
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        return true;
+    }
+
     pub fn deinit(self: *Self) void {
         for (self.entries.items) |entry| {
             entry.deinit(self.allocator);
@@ -242,7 +266,7 @@ pub const ArgumentParser = struct {
         var param: Param = .{
             .name = null,
             .longname = null,
-            .required = true,
+            .required = false,
             .val = .{
                 .flag = default,
             },
@@ -362,6 +386,7 @@ pub const ArgumentParser = struct {
             }
         }
 
+        _ = try namespace.validate();
         return namespace;
     }
 

@@ -5,6 +5,8 @@ const ws2_32 = win.ws2_32;
 pub const WinSocket = @This();
 const Self = @This();
 
+const Stream = std.net.Stream;
+
 const WinSocketError = error{
     InvalidState,
     SocketCreationFailed,

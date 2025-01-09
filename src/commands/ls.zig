@@ -19,9 +19,7 @@ fn parse_options(args_iter: *CommandArgIterator, allocator: std.mem.Allocator) !
     try parser.addBoolArgument("a", "absolute-paths", false);
     try parser.addPositionalArgument("dir", null, true);
 
-    const args = parser.parseArgsIterator(args_iter) catch |err| {
-        return err;
-    };
+    const args = try parser.parseArgsIterator(args_iter);
 
     return args;
 }
@@ -89,13 +87,6 @@ pub fn ls(args_iter: *CommandArgIterator, writer: anytype) !void {
         return err;
     };
     defer options.deinit();
-
-    var key_iterator = options.args.keyIterator();
-    std.debug.print("[Ls.ls: args.ctx addr: {*}]===== Have keys:\n", .{&options.args.ctx});
-    while (key_iterator.next()) |key| {
-        std.debug.print("\t{s}\n", .{key.*});
-    }
-    std.debug.print("[Ls.ls: args.unmanaged addr: {*}]===== Have keys:\n", .{&options.args.unmanaged});
 
     const path = options.get("dir").value();
     std.debug.print("Got path: {s}\n", .{path});
