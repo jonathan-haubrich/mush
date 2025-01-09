@@ -17,8 +17,11 @@ fn parse_options(args_iter: *CommandArgIterator, allocator: std.mem.Allocator) !
     try parser.addBoolArgument("r", "recursive", false);
     try parser.addBoolArgument("l", "long-listing", false);
     try parser.addBoolArgument("a", "absolute-paths", false);
+    try parser.addPositionalArgument("dir", null, true);
 
-    const args = try parser.parseArgsIterator(args_iter);
+    const args = parser.parseArgsIterator(args_iter) catch |err| {
+        return err;
+    };
 
     return args;
 }
@@ -83,69 +86,72 @@ pub fn ls(args_iter: *CommandArgIterator, writer: anytype) !void {
 
     var options = parse_options(args_iter, allocator) catch |err| {
         try std.fmt.format(writer, "[ERROR] Parsing options failed: {}\r\n", .{err});
-        return;
+        return err;
     };
     defer options.deinit();
 
-    std.debug.print("Got positionals: {any}\n", .{options.positionals});
+    var key_iterator = options.args.keyIterator();
+    std.debug.print("[Ls.ls: args.ctx addr: {*}]===== Have keys:\n", .{&options.args.ctx});
+    while (key_iterator.next()) |key| {
+        std.debug.print("\t{s}\n", .{key.*});
+    }
+    std.debug.print("[Ls.ls: args.unmanaged addr: {*}]===== Have keys:\n", .{&options.args.unmanaged});
 
-    for (options.positionals.items) |param| {
-        const path = param.value();
-        std.debug.print("Got path: {s}\n", .{path});
-        const abspath = try std.fs.realpathAlloc(allocator, path);
-        defer allocator.free(abspath);
+    const path = options.get("dir").value();
+    std.debug.print("Got path: {s}\n", .{path});
+    const abspath = try std.fs.realpathAlloc(allocator, path);
+    defer allocator.free(abspath);
 
-        var dir_handle = try std.fs.openDirAbsolute(abspath, .{ .iterate = true });
-        defer dir_handle.close();
+    var dir_handle = try std.fs.openDirAbsolute(abspath, .{ .iterate = true });
+    defer dir_handle.close();
 
-        var buffer = std.ArrayList(u8).init(allocator);
-        defer buffer.deinit();
-        if (options.contains("r") and options.get("r").flag()) {
-            var walker = try dir_handle.walk(allocator);
-            defer walker.deinit();
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    if (options.contains("r") and options.get("r").flag()) {
+        var walker = try dir_handle.walk(allocator);
+        defer walker.deinit();
 
-            while (true) {
-                buffer.clearRetainingCapacity();
+        while (true) {
+            buffer.clearRetainingCapacity();
 
-                const entry = walker.next() catch |err| {
-                    try std.fmt.format(writer, "[ERROR]: {}\r\n", .{err});
+            const entry = walker.next() catch |err| {
+                try std.fmt.format(writer, "[ERROR]: {}\r\n", .{err});
+                continue;
+            };
+
+            if (entry) |e| {
+                format_walker_entry(e, options, buffer.writer()) catch |err| {
+                    try std.fmt.format(writer, "[ERROR] {s}: {}\r\n", .{ e.path, err });
                     continue;
                 };
-
-                if (entry) |e| {
-                    format_walker_entry(e, options, buffer.writer()) catch |err| {
-                        try std.fmt.format(writer, "[ERROR] {s}: {}\r\n", .{ e.path, err });
-                        continue;
-                    };
-                } else {
-                    break;
-                }
-
-                try buffer.appendSlice("\r\n");
-                try writer.write(buffer.items);
+            } else {
+                break;
             }
-        } else {
-            var iterator = dir_handle.iterate();
-            while (true) {
-                buffer.clearRetainingCapacity();
 
-                const entry = iterator.next() catch |err| {
-                    try std.fmt.format(writer, "[ERROR]: {}\r\n", .{err});
+            try buffer.appendSlice("\r\n");
+            try writer.write(buffer.items);
+        }
+    } else {
+        var iterator = dir_handle.iterate();
+        while (true) {
+            buffer.clearRetainingCapacity();
+
+            const entry = iterator.next() catch |err| {
+                try std.fmt.format(writer, "[ERROR]: {}\r\n", .{err});
+                continue;
+            };
+
+            if (entry) |e| {
+                format_dir_entry(dir_handle, e, options, buffer.writer()) catch |err| {
+                    try std.fmt.format(writer, "[ERROR] {s}: {}\r\n", .{ e.name, err });
                     continue;
                 };
-
-                if (entry) |e| {
-                    format_dir_entry(dir_handle, e, options, buffer.writer()) catch |err| {
-                        try std.fmt.format(writer, "[ERROR] {s}: {}\r\n", .{ e.name, err });
-                        continue;
-                    };
-                } else {
-                    break;
-                }
-
-                try buffer.appendSlice("\r\n");
-                try writer.write(buffer.items);
+            } else {
+                break;
             }
+
+            try buffer.appendSlice("\r\n");
+            try writer.write(buffer.items);
         }
     }
 }

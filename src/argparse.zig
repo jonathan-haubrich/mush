@@ -61,6 +61,24 @@ const Param = struct {
         return param;
     }
 
+    pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
+        switch (self.val) {
+            ParamValueType.value => |val| {
+                if (val) |v| {
+                    allocator.free(v);
+                }
+            },
+            else => {},
+        }
+
+        if (self.name) |name| {
+            allocator.free(name);
+        }
+        if (self.longname) |longname| {
+            allocator.free(longname);
+        }
+    }
+
     pub fn flag(self: Self) bool {
         return self.val.flag;
     }
@@ -73,52 +91,69 @@ const Param = struct {
 pub const ArgumentNamespace = struct {
     const Self = @This();
 
-    args: std.StringHashMap(Param),
-    positionals: std.ArrayList(Param),
+    args: std.StringHashMap(*Param),
     entries: std.ArrayList(Param),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, entries: std.ArrayList(Param)) !Self {
         var _entries = try std.ArrayList(Param).initCapacity(allocator, entries.capacity);
-        var args_map = std.StringHashMap(Param).init(allocator);
-        var positionals = std.ArrayList(Param).init(allocator);
+        var args_map = std.StringHashMap(*Param).init(allocator);
+        errdefer {
+            for (_entries.items) |entry| {
+                entry.deinit(allocator);
+            }
+
+            _entries.deinit();
+            args_map.deinit();
+        }
 
         for (entries.items) |entry| {
             const cloned = try entry.clone(allocator);
             try _entries.append(cloned);
 
-            if (entry.typ == .positional) {
-                try positionals.append(cloned);
-            } else {
-                if (entry.name) |name| {
-                    try args_map.put(name, cloned);
-                }
-                if (entry.longname) |longname| {
-                    try args_map.put(longname, cloned);
-                }
+            const entry_ptr = &_entries.items[_entries.items.len - 1];
+
+            if (entry_ptr.name) |name| {
+                try args_map.put(name, entry_ptr);
+            }
+            if (entry_ptr.longname) |longname| {
+                try args_map.put(longname, entry_ptr);
             }
         }
+
+        var key_iterator = args_map.keyIterator();
+        std.debug.print("[ArgumentNamespace.init: args.ctx addr: {*}]===== Have keys:\n", .{&args_map.ctx});
+        while (key_iterator.next()) |key| {
+            std.debug.print("\t{s}\n", .{key.*});
+        }
+        std.debug.print("[ArgumentNamespace.init: args.unmanaged addr: {*}]===== Have keys:\n", .{&args_map.unmanaged});
 
         return .{
             .args = args_map,
             .entries = _entries,
-            .positionals = positionals,
             .allocator = allocator,
         };
     }
 
     pub fn get(self: Self, name: []const u8) Param {
-        return self.args.get(name).?;
+        var key_iterator = self.args.keyIterator();
+        std.debug.print("[ArgumentNamespace.get: self.args.ctx addr: {*}]===== Have keys:\n", .{&self.args.ctx});
+        while (key_iterator.next()) |key| {
+            std.debug.print("\t{s}\n", .{key.*});
+        }
+        std.debug.print("[ArgumentNamespace.init: args.unmanaged addr: {*}]===== Have keys:\n", .{&self.args.unmanaged});
+
+        return self.args.get(name).?.*;
     }
 
     pub fn set_named_value(self: Self, name: []const u8, value: []const u8) !bool {
-        var param = self.getFallible(name);
-        if (param) |*p| {
+        const param = self.args.get(name);
+        if (param) |p| {
             // if param was already set, make sure we don't leak
-            if (p.val.value) |v| {
+            if (p.*.val.value) |v| {
                 self.allocator.free(v);
             }
-            p.val.value = try self.allocator.dupe(u8, value);
+            p.*.val.value = try self.allocator.dupe(u8, value);
             return true;
         }
 
@@ -126,13 +161,32 @@ pub const ArgumentNamespace = struct {
     }
 
     pub fn set_positional_value(self: *Self, value: []const u8) !bool {
-        for (self.positionals.items) |*positional| {
-            if (positional.val.value) |_| {
-                continue;
-            } else {
-                positional.val.value = try self.allocator.dupe(u8, value);
-                return true;
+        var first_available: ?*Param = null;
+
+        for (self.entries.items) |*entry| {
+            if (entry.typ == .positional) {
+                if (entry.val.value) |_| {
+                    continue;
+                } else {
+                    // want to set required positionals first
+                    // if we find an available entry, check to see if it's required
+                    // if not, keep going but save off entry for setting
+                    // if we don't find an optional that isn't set
+                    first_available = first_available orelse entry;
+                    if (entry.required) {
+                        entry.val.value = try self.allocator.dupe(u8, value);
+                        return true;
+                    }
+                }
             }
+        }
+
+        // if we got here, we didn't find any required positionals that weren't set
+        // or we didn't find anything. but if we found an optional that wasn't set
+        // set it now and return true if possible
+        if (first_available) |fa| {
+            fa.val.value = try self.allocator.dupe(u8, value);
+            return true;
         }
 
         // no positionals or unassigned positionals found
@@ -140,8 +194,8 @@ pub const ArgumentNamespace = struct {
     }
 
     pub fn set_flag(self: Self, name: []const u8) bool {
-        var param = self.getFallible(name);
-        if (param) |*p| {
+        const param = self.getFallible(name);
+        if (param) |p| {
             p.val.flag = !p.val.flag;
             return true;
         }
@@ -149,7 +203,7 @@ pub const ArgumentNamespace = struct {
         return false;
     }
 
-    pub fn getFallible(self: Self, name: []const u8) ?Param {
+    pub fn getFallible(self: Self, name: []const u8) ?*Param {
         return self.args.get(name);
     }
 
@@ -159,24 +213,9 @@ pub const ArgumentNamespace = struct {
 
     pub fn deinit(self: *Self) void {
         for (self.entries.items) |entry| {
-            if (entry.name) |name| {
-                self.allocator.free(name);
-            }
-            if (entry.longname) |longname| {
-                self.allocator.free(longname);
-            }
-
-            switch (entry.val) {
-                ParamValueType.value => |val| {
-                    if (val) |v| {
-                        self.allocator.free(v);
-                    }
-                },
-                else => {},
-            }
+            entry.deinit(self.allocator);
         }
 
-        self.positionals.deinit();
         self.entries.deinit();
         self.args.deinit();
     }
@@ -212,15 +251,27 @@ pub const ArgumentParser = struct {
 
         if (name) |n| {
             param.name = try self.allocator.dupe(u8, n);
+            errdefer {
+                self.allocator.free(param.name);
+                param.name = null;
+            }
         }
         if (longname) |ln| {
             param.longname = try self.allocator.dupe(u8, ln);
+            errdefer {
+                self.allocator.free(param.name);
+                param.longname = null;
+            }
         }
 
         try self.options.append(param);
     }
 
     fn addArgument(self: *Self, name: ?[]const u8, longname: ?[]const u8, required: bool, typ: ParamType) !void {
+        if (null == name and null == longname) {
+            return error.ArgumentMissingName;
+        }
+
         var param: Param = .{
             .name = null,
             .longname = null,
@@ -242,18 +293,10 @@ pub const ArgumentParser = struct {
     }
 
     pub fn addValueArgument(self: *Self, name: ?[]const u8, longname: ?[]const u8, required: bool) !void {
-        if (null == name and null == longname) {
-            return error.ArgumentMissingName;
-        }
-
         return self.addArgument(name, longname, required, .named);
     }
 
     pub fn addPositionalArgument(self: *Self, name: ?[]const u8, longname: ?[]const u8, required: bool) !void {
-        if (null == name and null == longname) {
-            return error.ArgumentMissingName;
-        }
-
         return self.addArgument(name, longname, required, .positional);
     }
 
@@ -289,11 +332,12 @@ pub const ArgumentParser = struct {
         var iterator = try std.process.ArgIteratorGeneral(.{ .comments = true }).init(self.allocator, cmd_line);
         defer iterator.deinit();
 
-        return self.parseArgsIterator(iterator);
+        return self.parseArgsIterator(&iterator);
     }
 
     pub fn parseArgsIterator(self: *Self, iterator: anytype) !ArgumentNamespace {
         var namespace: ArgumentNamespace = try ArgumentNamespace.init(self.allocator, self.options);
+        errdefer namespace.deinit();
 
         while (iterator.next()) |arg| {
             if (arg.len > 0 and arg[0] != '-') {
@@ -323,20 +367,7 @@ pub const ArgumentParser = struct {
 
     pub fn deinit(self: Self) void {
         for (self.options.items) |o| {
-            if (o.name) |name| {
-                self.allocator.free(name);
-            }
-            if (o.longname) |longname| {
-                self.allocator.free(longname);
-            }
-            switch (o.val) {
-                ParamValueType.value => |val| {
-                    if (val) |v| {
-                        self.allocator.free(v);
-                    }
-                },
-                else => {},
-            }
+            o.deinit(self.allocator);
         }
 
         self.options.deinit();
@@ -356,6 +387,24 @@ test "ArgumentParser add options" {
     std.debug.print("Options: {any}\n", .{parser.options});
 }
 
+test "ArgumentParser deinit" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    var parser = ArgumentParser.init(allocator);
+    defer parser.deinit();
+
+    try parser.addPositionalArgument("cmd", "positional1", true);
+    try parser.addBoolArgument("f", "force", false);
+    try parser.addValueArgument("o", "outfile", true);
+    try parser.addPositionalArgument("p1", "positional1", true);
+    try parser.addPositionalArgument("p2", "positional2", true);
+
+    var args = try parser.parseArgs("ls -f --outfile filename pos1 pos2");
+
+    args.deinit();
+}
+
 test "ArgumentParser test argParse" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -363,8 +412,11 @@ test "ArgumentParser test argParse" {
     var parser = ArgumentParser.init(allocator);
     defer parser.deinit();
 
+    try parser.addPositionalArgument("cmd", null, true);
     try parser.addBoolArgument("f", "force", false);
     try parser.addValueArgument("o", "outfile", true);
+    try parser.addPositionalArgument("p1", "positional1", true);
+    try parser.addPositionalArgument("p2", "positional2", true);
 
     var args = try parser.parseArgs("ls -f --outfile filename pos1 pos2");
     defer args.deinit();
@@ -381,11 +433,7 @@ test "ArgumentParser test argParse" {
     try std.testing.expectEqualStrings(param2.value(), "filename");
     try std.testing.expectEqualStrings(args.get("o").value(), "filename");
 
-    for (args.positionals.items, 0..) |param, i| {
-        std.debug.print("Positional #{d}: {s}\n", .{ i, param.value() });
-    }
-    try std.testing.expectEqual(args.positionals.items.len, 3);
-    try std.testing.expectEqualStrings(args.positionals.items[0].value(), "ls");
-    try std.testing.expectEqualStrings(args.positionals.items[1].value(), "pos1");
-    try std.testing.expectEqualStrings(args.positionals.items[2].value(), "pos2");
+    // test positionals
+    try std.testing.expectEqualStrings(args.get("p1").value(), "pos1");
+    try std.testing.expectEqualStrings(args.get("p2").value(), "pos2");
 }

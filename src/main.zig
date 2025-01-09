@@ -33,9 +33,6 @@ pub fn main() !void {
 
         Commands.Ls(&args_iter, winsock) catch |err| {
             std.debug.print("Commands.Ls failed: {}\n", .{err});
-            args_iter.deinit();
-            allocator.free(commandline);
-            return err;
         };
 
         args_iter.deinit();
